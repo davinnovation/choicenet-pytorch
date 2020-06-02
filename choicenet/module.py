@@ -21,6 +21,16 @@ class COV_block(nn.Module):
     def forward(self, x):
         return self.f(x)
 
+class MU_block(nn.Module):
+    def __init__(self, feat_num, mixtures):
+        self.f = nn.Sequential([
+            nn.Linear(feat_num, mixtures),
+            nn.Softmax()
+        ])
+    
+    def forward(self, x):
+        return self.f(x)
+
 class MCDN(nn.Module):
     mode_dict = {
         'regression' : nn.Tanh(),
