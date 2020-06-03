@@ -32,7 +32,7 @@ class VARIANCE_block(nn.Module):
 
     def forward(self, feature, rho):
         var0 = self.var(feature) # B x mixture_num
-        return (1-torch.exp(rho)) * var0 + self.tau_inv # B x mixture_num
+        return (1-torch.pow(rho, 2)) * var0 + self.tau_inv # B x mixture_num
 
 class MDCN(nn.Module):
     def __init__(self, feat_num, mixture_num, tau_inv:float=TAU_INV, device='cuda:0'):
@@ -56,36 +56,44 @@ class MDCN(nn.Module):
 
         self.var = VARIANCE_block(feat_num, mixture_num, tau_inv)
 
+        self.muW, self.logvarW, self.logvarZ = self._sample_init(self.feat_num, 
+        MU_W_MEAN, MU_W_STD, VAR_W_CONST, VAR_Z_CONST, device=device)
+
         self.device = device
     
     def forward(self, feature):
-        W, Z, muW, logvarW, logvarZ = self._sample(self.feat_num, 
-        MU_W_MEAN, MU_W_STD, VAR_W_CONST, VAR_Z_CONST, device=self.device)
 
         rho = self.rho(feature) # [B x mixtures]
         pi = self.pi(feature) # [B x mixtures]
         var = self.var(feature, rho) # [B x mixtures]
 
-        W_ = self._cholesky(W, Z, rho, muW, logvarW, logvarZ, device=self.device)
+        W, Z = self._sample(self.feat_num, self.muW, self.logvarW, self.logvarZ, self.device)
+
+        W_ = self._cholesky(W, Z, rho, self.muW, self.logvarW, self.logvarZ)
         W_ = W_.permute(1,0,2) # B x M x F
         mu = torch.matmul(W_, feature.unsqueeze(-1)).squeeze(-1)
 
         return pi, mu, var
     
-    def _sample(self, feat_num, mu_w_mean, mu_w_std, var_w_const, var_z_const, device):
+    def _sample_init(self, feat_num, mu_w_mean, mu_w_std, var_w_const, var_z_const, device):
         muW = D.Normal(mu_w_mean, mu_w_std).sample([feat_num]).to(device)
         logvarW = nn.init.constant_(torch.empty(feat_num), var_w_const).to(device)
 
-        W = muW + torch.sqrt(torch.exp(logvarW)) * torch.randn(feat_num, dtype=torch.float).to(device)
+        # W = muW + torch.sqrt(torch.exp(logvarW)) * torch.randn(feat_num, dtype=torch.float).to(device)
         
         # muZ = torch.zeros(feat_num).to(device)
         logvarZ = nn.init.constant_(torch.empty(feat_num), var_z_const).to(device)
 
-        Z = torch.sqrt(torch.exp(logvarZ)) * torch.randn(feat_num, dtype=torch.float).to(device)
+        # Z = torch.sqrt(torch.exp(logvarZ)) * torch.randn(feat_num, dtype=torch.float).to(device)
 
-        return W, Z, muW, logvarW, logvarZ
-        
-    def _cholesky(self, W, Z, rho, mu_, var_, zvar_, device):
+        return muW, logvarW, logvarZ
+    
+    def _sample(self, feat_num, muW, logvarW, logvarZ, device):
+        W = muW + torch.sqrt(torch.exp(logvarW)) * torch.randn(feat_num, dtype=torch.float).to(device)
+        Z = torch.sqrt(torch.exp(logvarZ)) * torch.randn(feat_num, dtype=torch.float).to(device)
+        return W, Z
+
+    def _cholesky(self, W, Z, rho, mu_, var_, zvar_):
         temp = []
         var_ = torch.sqrt(torch.exp(var_))
         zvar_ = torch.sqrt(torch.exp(zvar_))
