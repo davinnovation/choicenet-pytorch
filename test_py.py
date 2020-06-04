@@ -68,21 +68,38 @@ def gaussian_distribution(y, mu, sigma):
     return torch.exp(result) * torch.reciprocal(torch.sqrt(sigma)) / np.sqrt(2.0*math.pi)
 
 
+VAR_EPS = 1e-4
+KL_REG_COEF = 1e-5
 def loss_(pred, target):
-    # pred : pi, mu, var / target : int
-    pi = pred[0]
-    mu = pred[1]
-    var = pred[2]
+    def mdnloss(pi, mu, var, target):
+        quad = torch.pow(target.expand_as(mu) - mu, 2) * torch.reciprocal(var+VAR_EPS) * -0.5
+        logdet = torch.log(var+VAR_EPS) * -0.5
+        # logconstant = torch.log(2*np.pi) * -0.5
+        logpi = torch.log(pi)
+        exponents = quad + logdet + logpi
+        
+        logprobs = torch.log(exponents)
+        gmm_prob = torch.exp(logprobs)
+        gmm_nll = -logprobs
+        
+        return gmm_nll
+
+    def KLdiv(rho, pi):
+        rho_pos = rho+1.
+        kl_reg = KL_REG_COEF * (-rho_pos * torch.log(pi+1e-2) - torch.log(rho_pos+1e-2))
+        return torch.mean(kl_reg)
+
+    def MSE(pi, mu, target):
+        fit_mse = 1e-2 * torch.pow(mu-target.expand_as(mu), 2)
+        return fit_mse
+        
+    rho, pi, mu, var = pred
     
-    l_ = gaussian_distribution(target, mu, var) * pi
-    l_ = torch.sum(l_, dim=1)
-    l_ = torch.mean(-torch.log(l_))
+    l2 = MSE(pi, mu, target)
+    mdn = mdnloss(pi, mu, var, target)
+    kldiv = KLdiv(rho, pi)
     
-    
-    a = nn.MSELoss()(mu[:,0], target)
-    b = l_
-    
-    return a + l_
+    return l2 + mdn + kldiv
 
 def sampler(model, _x, num_mixture, n_samples=1, _deterministic=False):
   model.train(False)

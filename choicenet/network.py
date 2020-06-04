@@ -1,3 +1,5 @@
+import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,6 +12,9 @@ MU_W_MEAN = 0
 MU_W_STD = 0.1
 VAR_W_CONST = -2.0
 VAR_Z_CONST = 0
+
+VAR_EPS = 1e-4
+KL_REG_COEF = 1e-5
 
 from torchsummary import summary
 
@@ -68,7 +73,7 @@ class MDCN(nn.Module):
         W_ = W_.permute(1,0,2) # B x M x F
         mu = torch.matmul(W_, feature.unsqueeze(-1)).squeeze(-1)
 
-        return pi, mu, var
+        return rho, pi, mu, var
     
     def _sample_init(self, feat_num, mu_w_mean, mu_w_std, var_w_const, var_z_const):
         muW = nn.Parameter(torch.Tensor(feat_num))
@@ -112,5 +117,35 @@ class TestM(nn.Module):
         f = self.b(x)
         f = f.view(f.size(0), -1)
         return self.mcdn(f)
+
+def loss(pred, target):
+    def mdnloss(pi, mu, var, target):
+        quad = torch.pow(target.expand_as(mu) - mu, 2) * torch.reciprocal(var+VAR_EPS) * -0.5
+        logdet = torch.log(var+VAR_EPS) * -0.5
+        logconstant = torch.log(2*np.pi) * -0.5
+        logpi = torch.log(pi)
+        exponents = quad + logdet + logpi
+        
+        logprobs = torch.log(exponents)
+        gmm_prob = torch.exp(logprobs)
+        gmm_nll = -logprobs
+        
+        return gmm_nll
+
+    def KLdiv(rho, pi):
+        rho_pos = rho+1.
+        kl_reg = KL_REG_COEF * (-rho_pos * torch.log(pi+1e-2) - torch.log(rho_pos+1e-2))
+        return torch.mean(kl_reg)
+
+    def MSE(pi, mu, target):
+        fit_mse = 1e-2 * torch.pow(mu-target.expand_as(mu), 2)
+        
+    rho, pi, mu, var = pred
+    
+    l2 = MSE(pi, mu, target)
+    mdn = mdnloss(pi, mu, var, target)
+    kldiv = KLdiv(rho, pi)
+    
+    return l2 + mdn + kldiv
 
 summary(TestM().to("cuda:0"), (3, 256,256))
