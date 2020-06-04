@@ -6,7 +6,6 @@ import torch.nn.functional as F
 import torch.distributions as D
 import torchvision as tv
 
-RHO_1 = 0.95
 TAU_INV = 1e-4
 MU_W_MEAN = 0
 MU_W_STD = 0.1
@@ -30,6 +29,8 @@ class VARIANCE_block(nn.Module):
         super(VARIANCE_block, self).__init__()
         self.var = nn.Sequential(
             nn.Linear(feat_num, mixture_num),
+            nn.BatchNorm1d(mixture_num),
+            nn.ReLU(),
             Lambda(lambda x: torch.exp(x))
         )
         self.tau_inv = tau_inv
@@ -38,20 +39,41 @@ class VARIANCE_block(nn.Module):
         var0 = self.var(feature) # B x mixture_num
         return (1-torch.pow(rho, 2)) * var0 + self.tau_inv # B x mixture_num
 
+class Rho_block(nn.Module):
+    def __init__(self, feat_num, mixture_num):
+        super(Rho_block, self).__init__()
+        self.rho = nn.Sequential(
+            nn.Linear(feat_num, mixture_num),
+            nn.Tanh()
+        )
+        self.rho_end = lambda x, rho: torch.cat([x[:,:1]*0. + rho, x[:,1:]], axis=1)
+
+    def forward(self, x, rho_1):
+        return self.rho_end(self.rho(x), rho_1)
+
 class MDCN(nn.Module):
-    def __init__(self, feat_num, mixture_num, tau_inv:float=TAU_INV, device='cuda:0', RHO_1=RHO_1, PI1_BIAS=0.5):
+    def __init__(self, feat_num, mixture_num, tau_inv:float=TAU_INV, device='cuda:0', PI1_BIAS=0.5):
         super(MDCN, self).__init__()
         self.feat_num = feat_num
         self.mixture_num = mixture_num
 
-        self.rho = nn.Sequential(
-            nn.Linear(feat_num, mixture_num),
-            nn.Sigmoid(), # nn.Tanh()
-            Lambda(lambda x: torch.cat([x[:,:1]*0. + RHO_1, x[:,1:]], axis=1))
+        self.start = [nn.Linear(feat_num, 16),nn.ReLU(),nn.BatchNorm1d(16)]
+        self.modules = [nn.Linear(16, 16),nn.ReLU(),nn.BatchNorm1d(16)] * 16
+        self.end = [nn.Linear(16, feat_num),nn.ReLU(),nn.BatchNorm1d(feat_num)]
+
+        self.start += self.modules
+        self.start += self.end
+
+        self.feature_hdim = nn.Sequential(
+            *self.start
         )
+
+        self.rho = Rho_block(feat_num, mixture_num)
 
         self.pi = nn.Sequential(
             nn.Linear(feat_num, mixture_num),
+            nn.BatchNorm1d(mixture_num),
+            nn.ReLU(),
             nn.Softmax()
         )
 
@@ -61,18 +83,20 @@ class MDCN(nn.Module):
         MU_W_MEAN, MU_W_STD, VAR_W_CONST, VAR_Z_CONST)
 
         self.device = device
+
+        self.mu_f = nn.Linear(feat_num, mixture_num)
     
-    def forward(self, feature):
-        rho = self.rho(feature) # [B x mixtures]
+    def forward(self, feature, rho_1=0.95):
+        feature = self.feature_hdim(feature)
+
+        rho = self.rho(feature, rho_1) # [B x mixtures]
         pi = self.pi(feature) # [B x mixtures]
         var = self.var(feature, rho) # [B x mixtures]
-
-        # W, Z = self._sample(self.feat_num, self.muW, self.logvarW, self.logvarZ, self.device)
 
         W_ = self._cholesky(rho, self.muW, self.logvarW, self.logvarZ)
         W_ = W_.permute(1,0,2) # B x M x F
         mu = torch.matmul(W_, feature.unsqueeze(-1)).squeeze(-1)
-
+        #mu = self.mu_f(feature)
         return rho, pi, mu, var
     
     def _sample_init(self, feat_num, mu_w_mean, mu_w_std, var_w_const, var_z_const):
@@ -86,20 +110,25 @@ class MDCN(nn.Module):
 
         return muW, logvarW, logvarZ
     
-    def _sample(self, feat_num, muW, logvarW, logvarZ, device):
-        W = muW + torch.sqrt(torch.exp(logvarW)) * torch.randn(feat_num, dtype=torch.float).to(device)
-        Z = torch.sqrt(torch.exp(logvarZ)) * torch.randn(feat_num, dtype=torch.float).to(device)
+    def _sample(self, batch_size, feat_num, muW, logvarW, logvarZ, device):
+        W = muW.unsqueeze(0).repeat(batch_size, 1) + torch.sqrt(torch.exp(logvarW.unsqueeze(0).repeat(batch_size, 1))) * torch.randn((batch_size, feat_num), dtype=torch.float).to(device)
+        Z = torch.sqrt(torch.exp(logvarZ.unsqueeze(0).repeat(batch_size, 1))) * torch.randn((batch_size, feat_num), dtype=torch.float).to(device)
         return W, Z
 
     def _cholesky(self, rho, mu_, var_, zvar_):
         temp = []
         var_ = torch.sqrt(torch.exp(var_))
         zvar_ = torch.sqrt(torch.exp(zvar_))
+        batch_size = rho.shape[0]
+        mu_ = mu_.unsqueeze(0).repeat(rho.shape[0], 1)
+        zvar_ = zvar_.unsqueeze(0).repeat(batch_size, 1)
+        var_ = var_.unsqueeze(0).repeat(batch_size, 1)
         for idx in range(rho.shape[-1]): # K
-            W, Z = self._sample(self.feat_num, self.muW, self.logvarW, self.logvarZ, self.device)
+            W, Z = self._sample(batch_size, self.feat_num, self.muW, self.logvarW, self.logvarZ, self.device)
             rho_i = rho[:, idx:idx+1]
-            a1 = rho_i * mu_.unsqueeze(0).repeat(rho.shape[0], 1)
-            a2 = torch.sqrt(1-torch.pow(rho_i,2))
+            a1 = rho_i * mu_
+            a2 = 1-torch.pow(rho_i,2)
+            a2 = a2.repeat(1, self.feat_num)
             a3 = rho_i * zvar_/var_ * (W-mu_)
             a4 = Z * a2
 
@@ -113,10 +142,10 @@ class TestM(nn.Module):
         self.b = nn.Sequential(*list(tv.models.resnet18(False).children())[:-1])
         self.mcdn = MDCN(512, 10)
     
-    def forward(self, x):
+    def forward(self, x, rho=0.95):
         f = self.b(x)
         f = f.view(f.size(0), -1)
-        return self.mcdn(f)
+        return self.mcdn(f,rho)
 
 def loss(pred, target):
     def mdnloss(pi, mu, var, target):

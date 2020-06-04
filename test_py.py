@@ -55,19 +55,27 @@ num_mixture = 10
 class TestM(nn.Module):
     def __init__(self):
         super(TestM, self).__init__()
-        self.b = nn.Linear(1, 64)
+        self.b = nn.Sequential(nn.Linear(1, 64), nn.ReLU())
         self.mcdn = network.MDCN(64, num_mixture, device="cuda:0")
     
-    def forward(self, x):
+    def forward(self, x, rho=0.95):
         f = self.b(x)
         f = f.view(f.size(0), -1)
-        return self.mcdn(f)
-
-def gaussian_distribution(y, mu, sigma):
-    result = -0.5 * torch.pow((y.expand_as(mu) - mu), 2) * torch.reciprocal(sigma+1e-2)
-    return torch.exp(result) * torch.reciprocal(torch.sqrt(sigma)) / np.sqrt(2.0*math.pi)
-
-
+        return self.mcdn(f, rho)
+    """
+    def __init__(self):
+        def init_weights(m):
+            if type(m) == nn.Linear:
+                torch.nn.init.xavier_uniform(m.weight)
+                m.bias.data.fill_(0.01)
+        super(TestM, self).__init__()
+        self.b = nn.Sequential(nn.Linear(1, 64), nn.ReLU(), nn.Linear(64, 10))
+        self.b.apply(init_weights)
+    
+    def forward(self, x, rho=0.95):
+        a= self.b(x)
+        return a,a,a,a
+    """
 VAR_EPS = 1e-4
 KL_REG_COEF = 1e-5
 def loss_(pred, target):
@@ -78,9 +86,9 @@ def loss_(pred, target):
         logpi = torch.log(pi)
         exponents = quad + logdet + logpi
         
-        logprobs = torch.log(exponents)
+        logprobs = torch.logsumexp(exponents, 1)
         gmm_prob = torch.exp(logprobs)
-        gmm_nll = -logprobs
+        gmm_nll = -torch.mean(logprobs)
         
         return gmm_nll
 
@@ -89,21 +97,21 @@ def loss_(pred, target):
         kl_reg = KL_REG_COEF * (-rho_pos * torch.log(pi+1e-2) - torch.log(rho_pos+1e-2))
         return torch.mean(kl_reg)
 
-    def MSE(pi, mu, target):
-        fit_mse = 1e-2 * torch.pow(mu-target.expand_as(mu), 2)
-        return fit_mse
+    def MSE(mu, target):
+        fit_mse = 1e-2 * torch.pow(mu[:,0:1]-target, 2)
+        return torch.mean(fit_mse)
         
     rho, pi, mu, var = pred
     
-    l2 = MSE(pi, mu, target)
+    l2 = MSE(mu, target)
     mdn = mdnloss(pi, mu, var, target)
     kldiv = KLdiv(rho, pi)
     
     return l2 + mdn + kldiv
 
-def sampler(model, _x, num_mixture, n_samples=1, _deterministic=False):
+def sampler(model, _x, num_mixture, n_samples=1, _deterministic=False, _y=None):
   model.train(False)
-  pi, mu, var = model(_x)
+  rho, pi, mu, var = model(_x, 1.)
   n_points = _x.shape[0]
   _y_sampled = torch.zeros([n_points, n_samples])
 
@@ -118,53 +126,40 @@ def sampler(model, _x, num_mixture, n_samples=1, _deterministic=False):
       
   return _y_sampled
 
-x,y,t = data4reg(_type="linear",_n=1000,_oRange=[-1.5,+1.5],_oRate=0.1,measVar=1e-2)
-model = TestM()
+x,y,t = data4reg(_type="linear",_n=1000,_oRange=[-1.5,+1.5],_oRate=0.0,measVar=1e-8)
+model = TestM().cuda()
 _x = x
 _y = y
 _yref = t
-optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-3)
-batchSize = 32
-maxEpoch = 10
+optimizer = optim.Adam(model.parameters(), lr=1e-3, eps=1e-1)
+batchSize = 256
+maxEpoch = 1000
 lr = 1e-3
 
 model.train()
 _x_train, _y_train = torch.from_numpy(_x),torch.from_numpy(_y)
-maxIter = max(_x_train.shape[0]//batchSize,1)
+x_train, y_train = Variable(_x_train).float().cuda(),Variable(_y_train).float().cuda()
+
 bestLossVal = np.inf
 for epoch in range((int)(maxEpoch)+1):
-  train_rate = (float)(epoch/maxEpoch)
-  _x_train,_y_train = shuffle(_x_train,_y_train)
-  x_train, y_train = Variable(_x_train).float().cuda(),Variable(_y_train).float().cuda()
-  for iter in range(maxIter):
-    start, end = iter*batchSize,(iter+1)*batchSize
-    lr_use = lr
-    optimizer.zero_grad()
-    model = model.cuda()
-    #print('rho : ',rho,'\nmu : ', mu,'\nvar :' ,var,'\npi : ', pi)
-    output = model(x_train)
-    loss = loss_(output, y_train)
-    loss.backward()
-    print(loss)
-    #print(acc)
-    optimizer.step()
-    nSample = 1
-    ytest = sampler(model, _x=x_train, num_mixture=10, n_samples=1, _deterministic=True)
-    #print(ytest)
-    ytest = ytest.detach().numpy()
-    x_plot, y_plot = _x[:,0], _y[:,0]
-    plt.figure(figsize=(8,4))
-    plt.axis([np.min(x_plot), np.max(x_plot), np.min(y_plot)-0.1, np.max(y_plot)+0.1])
-    if _yref != '':
-      plt.plot(x_plot,_yref[:,0],'r')
-    plt.plot(x_plot, y_plot, 'k.')
+  optimizer.zero_grad()
+  output = model(x_train)
+  loss = loss_(output, y_train)
+  loss.backward()
+  print(loss)
+  optimizer.step()
+  xtest = torch.Tensor(np.linspace(start=-3,stop=3,num=500).reshape((-1,1))).cuda()
+  ytest = sampler(model, _x=xtest, num_mixture=10, n_samples=1, _deterministic=True, _y=y_train)
+  #print(ytest)
+  ytest = ytest.detach().numpy()
+  x_plot, y_plot = _x[:,0], _y[:,0]
+  plt.figure(figsize=(8,4))
+  plt.axis([np.min(x_plot), np.max(x_plot), np.min(y_plot)-0.1, np.max(y_plot)+0.1])
+  if _yref != '':
+    plt.plot(x_plot,_yref[:,0],'r')
+  plt.plot(x_plot, y_plot, 'k.')
    
-    for i in range(nSample):
-      plt.plot(_x,ytest[:,i],'b.')
-    plt.title("[%d%d] name:[%s] lossVal:[%.3e]"%(epoch,maxEpoch,'gg',loss.item()))
-    plt.show()
-    # if batch_idx%args['log_interval'] == 0:
-    #   print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-    #       epoch, batch_idx * len(data), len(train_loader.dataset),
-    #       100. *batch_idx/len(train_loader), loss.data
-    #   ))
+  for i in range(1):
+    plt.plot(xtest[:,i].cpu().detach().numpy(),ytest[:,i],'g.')
+  plt.title("[%d%d] name:[%s] lossVal:[%.3e]"%(epoch,maxEpoch,'gg',loss.item()))
+  plt.show()

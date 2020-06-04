@@ -64,7 +64,7 @@ def f_step(x):
 def gpusession(): 
     config = tf.ConfigProto(); 
     config.gpu_options.allow_growth=True
-    sess = tf.Session(config=config)
+    sess = tf.InteractiveSession(config=config)
     return sess
 def data4reg(_type='', _n=1000, _oRange=[-1.5,1.5], _oRate=0.1, measVar=0.01):
   np.random.seed(seed=0)
@@ -196,19 +196,24 @@ class choiceNet_reg_class(object):
                     _epsW = tf.random_normal(shape=[self.N,self.Q,self.ydim],mean=0,stddev=1
                                              ,dtype=tf.float32) # [N x Q x D]
                     _W = _muW_tile + tf.sqrt(_sigmaW_tile)*_epsW # [N x Q x D]
+                    self._W = _W
                     _epsZ = tf.random_normal(shape=[self.N,self.Q,self.ydim]
                                              ,mean=0,stddev=1,dtype=tf.float32) # [N x Q x D]
                     _Z = _muZ_tile + tf.sqrt(_sigmaZ_tile)*_epsZ # [N x Q x D]
-                    _Y = _rho_tile*_muW_tile + (1.0-_rho_tile**2) \
-                        *(_rho_tile*tf.sqrt(_sigmaZ_tile)/tf.sqrt(_sigmaW_tile) \
-                              *(_W-_muW_tile)+tf.sqrt(1-_rho_tile**2)*_Z)
+                    self._Z = _Z
+                    self.a1 = _rho_tile*_muW_tile
+                    self.a3 = _rho_tile*tf.sqrt(_sigmaZ_tile)/tf.sqrt(_sigmaW_tile) *(_W-_muW_tile)
+                    self.a4 = (_W-_muW_tile)+tf.sqrt(1-_rho_tile**2)*_Z
+                    _Y = _rho_tile*_muW_tile + (1.0-_rho_tile**2) *(_rho_tile*tf.sqrt(_sigmaZ_tile)/tf.sqrt(_sigmaW_tile) *(_W-_muW_tile)+tf.sqrt(1-_rho_tile**2)*_Z)
                     _samplerList.append(_Y) # Append 
                 WlistConcat = tf.convert_to_tensor(_samplerList) # K*[N x Q x D] => [K x N x Q x D]
                 self.wSample = tf.transpose(WlistConcat,perm=[1,3,0,2]) # [N x D x K x Q]
                 # K mean mixtures [N x D x K]
                 _wTemp = tf.reshape(self.wSample
                                 ,shape=[self.N,self.kmix*self.ydim,self.Q]) # [N x KD x Q]
+                self._wTemp = _wTemp
                 _featRsh = tf.reshape(self.feat,shape=[self.N,self.Q,1]) # [N x Q x 1]
+                self._featRsh = _featRsh
                 _mu = tf.matmul(_wTemp,_featRsh) # [N x KD x Q] x [N x Q x 1] => [N x KD x 1]
                 self.mu = tf.reshape(_mu,shape=[self.N,self.ydim,self.kmix]) # [N x D x K]
                 # K variance mixtures [N x D x K]
@@ -235,6 +240,7 @@ class choiceNet_reg_class(object):
         # Parse
         _M = tf.shape(self.x)[0] # Current batch size
         t,pi,mu,var = self.t,self.pi,self.mu,self.var
+
         
         # Mixture density network loss 
         trepeat = tf.tile(t[:,:,tf.newaxis],[1,1,self.kmix]) # (N x D x K)
@@ -281,7 +287,7 @@ class choiceNet_reg_class(object):
             self.loss_total = self.gmm_nll+self.kl_reg+self.l2_reg
         
         # Optimizer
-        USE_ADAM = True
+        USE_ADAM = False
         GRAD_CLIP = False
         if GRAD_CLIP: # Gradient clipping
             if USE_ADAM:
@@ -313,7 +319,7 @@ class choiceNet_reg_class(object):
     
     # Sampler
     def sampler(self,_sess,_x,n_samples=1,_deterministic=True):
-        pi, mu, var = _sess.run([self.pi, self.mu, self.var],
+        pi, mu, var, _W, _featRsh, a1, a3, a4, feat = _sess.run([self.pi, self.mu, self.var, self._wTemp, self._featRsh, self.a1, self.a3, self.a4, self.feat],
                                 feed_dict={self.x:_x,self.kp:1.0,self.is_training:False
                                           ,self.rho_ref:1.0}) #
         n_points = _x.shape[0]
@@ -511,7 +517,7 @@ class choiceNet_reg_class(object):
                 ytest = self.sampler(_sess=_sess,_x=_x,n_samples=nSample)
                 # Plot first dimensions of both input and output
                 x_plot,y_plot = _x[:,0],_y[:,0] # Traning data 
-                plt.figure(figsize=(8,4));
+                plt.figure(figsize=(8,4))
                 plt.axis([np.min(x_plot),np.max(x_plot),np.min(y_plot)-0.1,np.max(y_plot)+0.1])
                 if _yref != '': plt.plot(x_plot,_yref[:,0],'r.') # Plot reference
                 plt.plot(x_plot,y_plot,'k.') # Plot training data
@@ -573,7 +579,7 @@ if __name__ == "__main__":
     tf.reset_default_graph(); sess = gpusession()
     tf.set_random_seed(0); np.random.seed(0)
     CN = choiceNet_reg_class(_name='CN_%s_oRate%02d_var%.1e'%(dataType,oRate*100,measVar)
-                            ,_xdim=1,_ydim=1,_hdims=[32,32]    
+                            ,_xdim=1,_ydim=1,_hdims=[32,16]    
                             ,_kmix=5,_actv=tf.nn.relu,_bn=slim.batch_norm
                             ,_rho_ref_train=0.99,_tau_inv=1e-2,_var_eps=1e-4
                             ,_pi1_bias=0.0,_logSigmaZval=0
