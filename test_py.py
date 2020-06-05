@@ -14,49 +14,30 @@ import matplotlib.pyplot as plt
 from sklearn.utils import shuffle
 import torch.nn.init as init
 
-# from Choice's
-def f_cosexp(x): return np.cos(np.pi/2*x)*np.exp(-(x/2)**2)
-def f_linear(x): return 0.5*x
-def f_step(x):
-    n = x.shape[0]
-    t = np.zeros(shape=(n,1))
-    for i in range(n):
-        if x[i] < -1: t[i] = -1.0
-        elif x[i] < +1: t[i] = +1.0
-        else: t[i] = -1.0
-    return t
-def data4reg(_type='',_n=1000,_oRange=[-1.5,+1.5],_oRate=0.1,measVar=0.01):
-    np.random.seed(seed=0) # Fix random seed
-    _xmin,_xmax = -3,+3
-    x = np.float32(np.random.uniform(_xmin,_xmax,((int)(_n),1)))
-    x.sort(axis=0)
-    if _type == 'cosexp': t = f_cosexp(x)
-    elif _type == 'linear': t = f_linear(x)
-    elif _type == 'step': t = f_step(x)
-    else: print ("Unknown function type [%s]."%(_type))
-    # Add measurement nosie
-    y = t + np.sqrt(measVar)*np.random.randn(_n,1)
-    # Switch to outliers 
-    nOutlier = (int)(_n*_oRate) # Number of outliers
-    y[np.random.permutation((int)(_n))[:nOutlier],:] \
-        = _oRange[0]+np.random.rand(nOutlier,1)*(_oRange[1]-_oRange[0])
-    return x,y,t
-def plot_1dRegData(_x,_y,_t,_type='',_figSize=(6,3)):
-    plt.figure(figsize=_figSize) # Plot
-    # ht,=plt.plot(_x,_t,'ro')
-    hd,=plt.plot(_x,_y,'k.')
-    # plt.legend([ht,hd],['Target function','Training data'],fontsize=15)
-    plt.title('%s'%(_type),fontsize=18)
-    plt.show()
+from data
 
 from choicenet import network
 num_mixture = 10
 
 class TestM(nn.Module):
-    def __init__(self):
+    def __init__(self, hid=32, dep=16):
+        def init_weights(m):
+          if type(m) == nn.Linear:
+              torch.nn.init.normal_(m.weight, 0, 0.01)
+              m.bias.data.fill_(0.0)
+          elif type(m) == nn.BatchNorm1d:
+              torch.nn.init.constant_(m.weight, 0.)
+              m.bias.data.fill_(0.0)
         super(TestM, self).__init__()
-        self.b = nn.Sequential(nn.Linear(1, 64), nn.ReLU())
-        self.mcdn = network.MDCN(64, num_mixture, device="cuda:0")
+        li = [nn.Linear(1, hid), nn.ReLU(), nn.BatchNorm1d(hid)]
+        for _ in range(dep):
+          li.append(nn.Linear(hid, hid))
+          li.append(nn.ReLU())
+          li.append(nn.BatchNorm1d(hid))
+        for m in li:
+          init_weights(m)
+        self.b = nn.Sequential(*li)
+        self.mcdn = network.MDCN(hid, num_mixture, device="cuda:0")
     
     def forward(self, x, rho=0.95):
         f = self.b(x)
@@ -148,7 +129,7 @@ for epoch in range((int)(maxEpoch)+1):
   loss.backward()
   print(loss)
   optimizer.step()
-  xtest = torch.Tensor(np.linspace(start=-3,stop=3,num=500).reshape((-1,1))).cuda()
+  xtest = torch.Tensor(np.linspace(start=-3,stop=3,num=100).reshape((-1,1))).cuda()
   ytest = sampler(model, _x=xtest, num_mixture=10, n_samples=1, _deterministic=True, _y=y_train)
   #print(ytest)
   ytest = ytest.detach().numpy()
@@ -156,7 +137,7 @@ for epoch in range((int)(maxEpoch)+1):
   plt.figure(figsize=(8,4))
   plt.axis([np.min(x_plot), np.max(x_plot), np.min(y_plot)-0.1, np.max(y_plot)+0.1])
   if _yref != '':
-    plt.plot(x_plot,_yref[:,0],'r')
+    plt.plot(x_plot,_yref[:,0],'r.')
   plt.plot(x_plot, y_plot, 'k.')
    
   for i in range(1):

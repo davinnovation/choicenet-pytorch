@@ -7,7 +7,6 @@ from sklearn.utils import shuffle
 
 import matplotlib.pyplot as plt
 from sklearn.utils import shuffle
-import torch.nn.init as init
 import math
 import os
 import itertools
@@ -568,8 +567,8 @@ class choiceNet_reg_class(object):
                 plt.show()
 if __name__ == "__main__":
     # Training data 
-    dataType = 'linear' # ['cosexp','linear','step']
-    oRate = 0.7
+    dataType = 'cosexp' # ['cosexp','linear','step']
+    oRate = 0.6
     measVar = 1e-8
     x,y,t=data4reg(_type=dataType,_n=1000,_oRange=[-1.5,+2.5],_oRate=oRate,measVar=measVar)
     xtest = np.linspace(start=-3,stop=3,num=500).reshape((-1,1))
@@ -579,7 +578,7 @@ if __name__ == "__main__":
     tf.reset_default_graph(); sess = gpusession()
     tf.set_random_seed(0); np.random.seed(0)
     CN = choiceNet_reg_class(_name='CN_%s_oRate%02d_var%.1e'%(dataType,oRate*100,measVar)
-                            ,_xdim=1,_ydim=1,_hdims=[32,16]    
+                            ,_xdim=1,_ydim=1,_hdims=[32,32]    
                             ,_kmix=5,_actv=tf.nn.relu,_bn=slim.batch_norm
                             ,_rho_ref_train=0.99,_tau_inv=1e-2,_var_eps=1e-4
                             ,_pi1_bias=0.0,_logSigmaZval=0
